@@ -26,9 +26,9 @@ func New(cfg Config) http.Handler {
 			Timeout:   500 * time.Millisecond, // abrir TCP não deve demorar mais do que isto
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-		MaxIdleConns:        1024,                  // limite global de ligações inativas
+		MaxIdleConns:        1024,                    // limite global de ligações inativas
 		MaxIdleConnsPerHost: cfg.MaxIdleConnsPerHost, // limite por backend: é aqui que o Passo 9 mexe
-		IdleConnTimeout:     90 * time.Second,      // fecha ligações paradas há muito tempo
+		IdleConnTimeout:     90 * time.Second,        // fecha ligações paradas há muito tempo
 	}
 
 	rp := &httputil.ReverseProxy{

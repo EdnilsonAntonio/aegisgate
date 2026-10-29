@@ -52,8 +52,8 @@ func main() {
 
 	// Ctrl+C / SIGTERM cancelam este contexto.
 	ctx, stop := signal.NotifyContext(
-		context.Background(), 
-		syscall.SIGINT, 
+		context.Background(),
+		syscall.SIGINT,
 		syscall.SIGTERM,
 	)
 	defer stop()
@@ -70,7 +70,7 @@ func main() {
 
 	// Shutdown deixa de aceitar ligações novas e espera pelos pedidos em curso (até 10 s).
 	shutdownCtx, cancel := context.WithTimeout(
-		context.Background(), 
+		context.Background(),
 		10*time.Second,
 	)
 	defer cancel()

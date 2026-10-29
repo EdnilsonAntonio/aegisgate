@@ -14,8 +14,8 @@ func main() {
 	var newConns atomic.Int64 // nº de ligações TCP novas que o stub já viu
 
 	mux := http.NewServeMux()
-	
-	// Resposta imediata. 
+
+	// Resposta imediata.
 	mux.HandleFunc("/fast", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	})
@@ -24,9 +24,9 @@ func main() {
 	mux.HandleFunc("/slow", func(w http.ResponseWriter, r *http.Request) {
 		ms, _ := strconv.Atoi(r.URL.Query().Get("ms"))
 		select {
-		case <- time.After(time.Duration(ms) * time.Millisecond):
+		case <-time.After(time.Duration(ms) * time.Millisecond):
 			w.Write([]byte("done"))
-		case <- r.Context().Done():
+		case <-r.Context().Done():
 			// Prova de que o cancelamento chegou ao backend.
 			log.Printf("slow: pedido cancelado (%v)", r.Context().Err())
 
