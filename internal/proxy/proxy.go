@@ -11,12 +11,16 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"time"
+
+	"github.com/EdnilsonAntonio/aegisgate/internal/limiter"
 )
 
 type Config struct {
 	Upstream            *url.URL
 	RequestTimeout      time.Duration // prazo total de cada pedido, de ponta a ponta
 	MaxIdleConnsPerHost int           // 0 = valor por omissão do Go (2)
+	Limiter             limiter.Limiter
+	FailOpen            bool
 }
 
 func New(cfg Config) http.Handler {
@@ -46,7 +50,13 @@ func New(cfg Config) http.Handler {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	})
-	mux.Handle("/", rp)
+	var proxied http.Handler = rp
+
+	if cfg.Limiter != nil {
+		proxied = rateLimit(cfg.Limiter, cfg.FailOpen, rp)
+	}
+
+	mux.Handle("/", proxied)
 
 	// Ordem: requestID (fora) → timeout → mux (dentro).
 	return requestID(withTimeout(cfg.RequestTimeout, mux))
