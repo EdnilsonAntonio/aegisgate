@@ -5,6 +5,8 @@ import (
 	"math"
 	"sync"
 	"time"
+
+	"hash/fnv"
 )
 
 type TokenBucketConfig struct {
@@ -19,100 +21,129 @@ type bucket struct {
 }
 
 type TokenBucket struct {
-	cfg     TokenBucketConfig
-	mu      sync.Mutex
-	buckets map[string]*bucket
+    cfg    TokenBucketConfig
+    shards []shard
+}
+
+const shardCount = 64
+
+type shard struct {
+    mu      sync.Mutex
+    buckets map[string]*bucket
 }
 
 func NewTokenBucket(cfg TokenBucketConfig) *TokenBucket {
-	if cfg.Now == nil {
-		cfg.Now = time.Now
-	}
-	return &TokenBucket{
-		cfg:     cfg,
-		buckets: make(map[string]*bucket),
-	}
+    if cfg.Now == nil {
+        cfg.Now = time.Now
+    }
+
+    shards := make([]shard, shardCount)
+
+    for i := range shards {
+        shards[i].buckets = make(map[string]*bucket)
+    }
+
+    return &TokenBucket{
+        cfg:    cfg,
+        shards: shards,
+    }
+}
+
+func (tb *TokenBucket) shardIndex(key string) int {
+    h := fnv.New32a()
+    _, _ = h.Write([]byte(key))
+
+    return int(h.Sum32() % uint32(len(tb.shards)))
 }
 
 // Len devolve quantas chaves estão guardadas (usado nos testes).
 func (tb *TokenBucket) Len() int {
-	tb.mu.Lock()
-	defer tb.mu.Unlock()
-	return len(tb.buckets)
+    total := 0
+
+    for i := range tb.shards {
+        s := &tb.shards[i]
+
+        s.mu.Lock()
+        total += len(s.buckets)
+        s.mu.Unlock()
+    }
+
+    return total
 }
 
 func (tb *TokenBucket) Allow(_ context.Context, key string) (Decision, error) {
-	now := tb.cfg.Now()
+    now := tb.cfg.Now()
 
-	tb.mu.Lock()
-	defer tb.mu.Unlock()
+    s := &tb.shards[tb.shardIndex(key)]
 
-	b, ok := tb.buckets[key]
-	if !ok {
-		// TODO 1: chave nova → balde CHEIO. Cria um bucket com
-		// tokens = Capacity e last = now, e guarda-o no mapa.
-		b = &bucket{
-			tokens: float64(tb.cfg.Capacity),
-			last:   now,
-		}
-		tb.buckets[key] = b
-	}
+    s.mu.Lock()
+    defer s.mu.Unlock()
 
-	// TODO 2: repor fichas. elapsed = now.Sub(b.last).Seconds();
-	// tokens = min(Capacity, tokens + elapsed*Rate); last = now.
-	// (Falta importar "math" para math.Min.) Se elapsed < 0 (o relógio recuou),
-	// trata como 0. Porquê?
-	elapsed := now.Sub(b.last).Seconds()
-	if elapsed < 0 {
-		elapsed = 0
-	} else {
-		b.last = now
-	}
+    b, ok := s.buckets[key]
+    if !ok {
+        b = &bucket{
+            tokens: float64(tb.cfg.Capacity),
+            last:   now,
+        }
+        s.buckets[key] = b
+    }
 
-	b.tokens = math.Min(float64(tb.cfg.Capacity), b.tokens+elapsed*tb.cfg.Rate)
+    elapsed := now.Sub(b.last).Seconds()
 
-	// TODO 3: se b.tokens >= 1 → gasta 1 ficha e devolve
-	// Decision{Allowed: true, Remaining: int(b.tokens)}.
-	if b.tokens >= 1 {
-		b.tokens--
-		return Decision{
-			Allowed:   true,
-			Remaining: int(b.tokens),
-		}, nil
-	}
+    if elapsed < 0 {
+        elapsed = 0
+    } else {
+        b.last = now
+    }
 
-	// TODO 4: senão devolve Decision{Allowed: false, RetryAfter: ...}
-	// com RetryAfter = (1 - tokens) / Rate segundos (converte para time.Duration).
-	retryAfterSeconds := (1 - b.tokens) / tb.cfg.Rate
+    b.tokens = math.Min(
+        float64(tb.cfg.Capacity),
+        b.tokens+elapsed*tb.cfg.Rate,
+    )
 
-	retryAfter := time.Duration(retryAfterSeconds * float64(time.Second))
+    if b.tokens >= 1 {
+        b.tokens--
+        return Decision{
+            Allowed:   true,
+            Remaining: int(b.tokens),
+        }, nil
+    }
 
-	return Decision{
-		Allowed:    false,
-		Remaining:  int(b.tokens),
-		RetryAfter: retryAfter,
-	}, nil
+    retryAfterSeconds := (1 - b.tokens) / tb.cfg.Rate
+    retryAfter := time.Duration(retryAfterSeconds * float64(time.Second))
+
+    return Decision{
+        Allowed:    false,
+        Remaining:  int(b.tokens),
+        RetryAfter: retryAfter,
+    }, nil
 }
 
 // Sweep apaga os baldes que já voltaram à capacidade máxima.
 func (tb *TokenBucket) Sweep() {
-	now := tb.cfg.Now()
-	tb.mu.Lock()
-	defer tb.mu.Unlock()
+    now := tb.cfg.Now()
 
-	// TODO 5: para cada chave, calcula as fichas que o balde TERIA agora
-	// (tokens + elapsed*Rate, sem alterar o balde). Se >= Capacity, apaga-o.
-	// Em Go é seguro fazer delete(m, k) dentro de um `for k, b := range m`.
-	for key, b := range tb.buckets {
-		elapsed := now.Sub(b.last).Seconds()
-		if elapsed < 0 {
-			elapsed = 0
-		}
-		tokensNow := b.tokens + elapsed * tb.cfg.Rate
-		if tokensNow >= float64(tb.cfg.Capacity) {
-			delete(tb.buckets, key)
-		}
-	}
+    for i := range tb.shards {
+        s := &tb.shards[i]
+
+        s.mu.Lock()
+
+        for key, b := range s.buckets {
+            elapsed := now.Sub(b.last).Seconds()
+
+            if elapsed < 0 {
+                elapsed = 0
+            }
+
+            tokensNow := b.tokens + elapsed*tb.cfg.Rate
+
+            if tokensNow >= float64(tb.cfg.Capacity) {
+                delete(s.buckets, key)
+            }
+        }
+
+        s.mu.Unlock()
+    }
 }
 
 // StartJanitor chama Sweep periodicamente. stop() para-o e espera que termine.
